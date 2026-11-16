@@ -36,7 +36,7 @@ if [ "${USE_DYNAMIC_TRANSPLANT}" == "true" ]; then
         git --no-pager diff --diff-filter=U
         exit 1
     fi
-    
+ 
     git commit -m "Merge susfs features from pershoot"
     UPSTREAM_BRANCH="${TARGET_BRANCH}"
 else
@@ -51,7 +51,41 @@ else
     UPSTREAM_BRANCH="${KSU_VARIANT_REF}"
 fi
 
-# 6. Calculate the official counts EXACTLY from the rock-solid hash
+echo ">>> Auditing and applying universal SELinux & SuSFS hotfixes (masked by assume-unchanged)..."
+
+# Fix #1: Missing susfs_set_batch_sid() in handle_sepolicy() (rules.c)
+if [ -f "kernel/selinux/rules.c" ] && [ "$(grep -c 'susfs_set_batch_sid();' kernel/selinux/rules.c)" -lt 2 ] && grep -q 'reset_avc_cache(0);' kernel/selinux/rules.c; then
+    sed -i '/#else/{N;s/#else\n    reset_avc_cache(0);/#else\n    reset_avc_cache(0);\n    susfs_set_batch_sid();/2}' kernel/selinux/rules.c
+    echo "  [+] APPLIED Fix #1: Injected missing susfs_set_batch_sid() into handle_sepolicy() (rules.c)."
+else
+    echo "  [i] SKIPPED Fix #1: susfs_set_batch_sid() already present in both policy handlers (or rules.c refactored)."
+fi
+
+# Fix #2: MLS CEXPR_L2H2 constraint typo (scontext -> tcontext in selinux_hide.c)
+if [ -f "kernel/feature/selinux_hide.c" ] && grep -A 1 "case CEXPR_L2H2:" kernel/feature/selinux_hide.c | grep -q "scontext->range.level\[0\]"; then
+    sed -i '/case CEXPR_L2H2:/{n;s/scontext->range.level\[0\]/tcontext->range.level[0]/;}' kernel/feature/selinux_hide.c
+    echo "  [+] APPLIED Fix #2: Corrected CEXPR_L2H2 MLS range check from scontext to tcontext (selinux_hide.c)."
+else
+    echo "  [i] SKIPPED Fix #2: CEXPR_L2H2 scontext bug not found in selinux_hide.c (already fixed upstream)."
+fi
+
+# Fix #3a: Unsafe LTO function pointer lookup for security_dump_masked_av
+if [ -f "kernel/feature/selinux_hide.c" ] && grep -q "^[[:space:]]*security_dump_masked_av_fn = find_kernel_symbol_exact" kernel/feature/selinux_hide.c; then
+    sed -i 's/^\([[:space:]]*\)security_dump_masked_av_fn = find_kernel_symbol_exact/\1\/\/ security_dump_masked_av_fn = find_kernel_symbol_exact/g' kernel/feature/selinux_hide.c
+    echo "  [+] APPLIED Fix #3a: Disabled dynamic symbol lookup for security_dump_masked_av_fn (selinux_hide.c)."
+else
+    echo "  [i] SKIPPED Fix #3a: security_dump_masked_av_fn lookup not active (already disabled or fixed)."
+fi
+
+# Fix #3b: Unsafe LTO function pointer lookup for context_struct_compute_av
+if [ -f "kernel/feature/selinux_hide.c" ] && grep -q "^[[:space:]]*context_struct_compute_av_fn = find_kernel_symbol_exact" kernel/feature/selinux_hide.c; then
+    sed -i 's/^\([[:space:]]*\)context_struct_compute_av_fn = find_kernel_symbol_exact/\1\/\/ context_struct_compute_av_fn = find_kernel_symbol_exact/g' kernel/feature/selinux_hide.c
+    echo "  [+] APPLIED Fix #3b: Disabled dynamic symbol lookup for context_struct_compute_av_fn (selinux_hide.c)."
+else
+    echo "  [i] SKIPPED Fix #3b: context_struct_compute_av_fn lookup not active (already disabled or fixed)."
+fi
+
+# Calculate the official counts EXACTLY from the rock-solid hash
 CALCULATED_COUNT=$(git rev-list --count "${UPSTREAM_HASH}" 2>/dev/null || echo "11950")
 CALCULATED_TAG=$(git describe --tags --abbrev=0 "${UPSTREAM_HASH}" 2>/dev/null || echo "v0.0.0")
 
